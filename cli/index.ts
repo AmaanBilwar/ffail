@@ -1,78 +1,25 @@
 import {
   createCliRenderer, Box, ASCIIFont, Text,
   SelectRenderable, SelectRenderableEvents, BoxRenderable,
+  TabSelectRenderable, TabSelectRenderableEvents,
+  ScrollBoxRenderable, TextAttributes,
 } from "@opentui/core"
 
-interface Email {
-  id: number
-  from: string
-  subject: string
-  body: string
-  date: string
-}
+import { loadConfig } from "./config"
+import { listEnvelopes, getEmail, formatDate, listFolders, cleanFolderName } from "./maildir"
+import { syncNow } from "./mbsync"
+import type { EmailEnvelope } from "./types"
+import { watch } from "node:fs"
+import { join } from "node:path"
 
-const emails: Email[] = [
-  {
-    id: 1,
-    from: "Alice Johnson",
-    subject: "Team standup notes",
-    body: "Hey team,\n\nHere are the notes from today's standup:\n\n- Backend API changes are on track\n- Frontend needs design review\n- Deploy scheduled for Friday\n\nLet me know if I missed anything.\n\nBest,\nAlice",
-    date: "Jan 15",
-  },
-  {
-    id: 2,
-    from: "Bob Chen",
-    subject: "Re: Project timeline update",
-    body: "Thanks for the update.\n\nI've reviewed the timeline and made a few adjustments. The new ETA is end of Q2.\n\nKey blockers:\n- Third-party SDK integration\n- Security audit sign-off\n\nLet's discuss in tomorrow's sync.\n\nCheers,\nBob",
-    date: "Jan 14",
-  },
-  {
-    id: 3,
-    from: "Carol Davis",
-    subject: "Lunch this Friday?",
-    body: "Hey everyone,\n\nAnyone up for trying that new ramen place this Friday? I heard the tonkotsu is amazing.\n\nI was thinking around 12:30pm. Let me know if you're in!\n\n--\nCarol",
-    date: "Jan 13",
-  },
-  {
-    id: 4,
-    from: "GitHub",
-    subject: "[repo] PR #142 review requested",
-    body: "You have been requested to review PR #142: Add user authentication flow.\n\nAuthor: @bobchen\n\nChanges: +245 / -67 lines\n\nFiles changed:\n- src/auth/login.tsx\n- src/auth/hooks.ts\n- src/api/session.ts\n\nView on GitHub: https://github.com/org/repo/pull/142",
-    date: "Jan 12",
-  },
-  {
-    id: 5,
-    from: "Sarah Miller",
-    subject: "Q1 Budget Report",
-    body: "Hi all,\n\nPlease find attached the Q1 budget report for review.\n\nSummary:\n- Revenue: $1.2M (+15% vs Q4)\n- Expenses: $890K\n- Net: $310K\n\nHighlights:\n- Engineering costs down 8%\n- Marketing spend up 22% (new campaign)\n\nLet me know if you have questions.\n\nBest,\nSarah",
-    date: "Jan 11",
-  },
-  {
-    id: 6,
-    from: "David Park",
-    subject: "Server maintenance window",
-    body: "Team,\n\nScheduled maintenance this Saturday from 2-4 AM PST.\n\nImpact:\n- All services will be unavailable for ~2 hours\n- Database migration in progress\n- New CDN configuration being deployed\n\nPlease push any deployments before Friday EOD.\n\nThanks,\nDavid",
-    date: "Jan 10",
-  },
-  {
-    id: 7,
-    from: "Emily Watson",
-    subject: "Design system updates",
-    body: "Hey team,\n\nI've published the new component library (v2.1.0) with the updated design tokens.\n\nWhat's new:\n- New color palette\n- Updated typography scale\n- New button variants\n- Dark mode support\n\nCheck it out at: https://design-system.internal/\n\nCheers,\nEmily",
-    date: "Jan 09",
-  },
-  {
-    id: 8,
-    from: "Frank Lopez",
-    subject: "Client feedback - proposal draft",
-    body: "All,\n\nThe client reviewed our proposal draft and provided feedback.\n\nAction items:\n1. Reduce scope to core features only\n2. Add pricing breakdown table\n3. Include case study references\n4. Revise timeline (they want it faster)\n\nI'll send out the updated version by Wednesday.\n\n- Frank",
-    date: "Jan 08",
-  },
-]
+const renderer = await createCliRenderer({ exitOnCtrlC: true })
+const config = await loadConfig()
 
-const renderer = await createCliRenderer({
-  exitOnCtrlC: true,
-})
+let envelopes: EmailEnvelope[] = []
+let syncInProgress = false
+let selectedEmailId: string | null = null
+let reloadTimer: ReturnType<typeof setTimeout> | null = null
+let currentFolder = "INBOX"
 
 const mainContent = new BoxRenderable(renderer, {
   id: "main-content",
@@ -81,15 +28,14 @@ const mainContent = new BoxRenderable(renderer, {
   borderStyle: "rounded",
   borderColor: "#0f3460",
   flexDirection: "column",
+  padding: 0,
 })
 
 function clearMainContent() {
-  for (const child of [...mainContent.getChildren()]) {
-    child.destroy()
-  }
+  for (const child of [...mainContent.getChildren()]) child.destroy()
 }
 
-function showSplash() {
+function showSplash(msg?: string) {
   clearMainContent()
   mainContent.add(
     Box(
@@ -101,41 +47,144 @@ function showSplash() {
         height: "100%",
       },
       ASCIIFont({ text: "ffail", font: "huge", color: "#e94560" }),
-      Text({ content: "select an email from the sidebar", fg: "#555555" }),
+      Text({ content: msg ?? "select an email", fg: "#555555" }),
     ),
   )
 }
 
-function showEmail(email: Email) {
+function setStatus(msg: string) {
+  for (const child of [...statusBar.getChildren()]) child.destroy()
+  statusBar.add(Text({ content: ` ${msg}`, fg: "#888888" }))
+}
+
+function updateEmailList() {
+  emailSelect.options = envelopes.length === 0
+    ? [{ name: "(empty)", description: "no emails in this folder", value: "" }]
+    : envelopes.map(e => ({
+        name: e.isRead ? e.from : `● ${e.from}`,
+        description: e.subject,
+        value: e.id,
+      }))
+
+  if (selectedEmailId) {
+    const stillExists = envelopes.some(e => e.id === selectedEmailId)
+    if (!stillExists) selectedEmailId = null
+  }
+  if (!selectedEmailId) showSplash()
+}
+
+function folderPath(): string {
+  return join(config.maildir, currentFolder)
+}
+
+async function loadEmails() {
+  try {
+    envelopes = await listEnvelopes(folderPath(), 50)
+    updateEmailList()
+  } catch {
+    setStatus("error loading folder")
+  }
+}
+
+async function openEmail(id: string) {
+  selectedEmailId = id
   clearMainContent()
-  mainContent.add(
-    Box(
-      {
-        flexDirection: "column",
-        padding: 2,
-        gap: 1,
-        width: "100%",
-      },
-      Text({ content: `From:    ${email.from}`, fg: "#e94560" }),
-      Text({ content: `Subject: ${email.subject}`, fg: "#FFFFFF" }),
-      Text({ content: `Date:    ${email.date}`, fg: "#888888" }),
-      Text({ content: "─".repeat(50), fg: "#333333" }),
-      Text({ content: email.body, fg: "#CCCCCC" }),
-    ),
-  )
+  mainContent.add(Text({ content: "Loading...", fg: "#555555" }))
+
+  try {
+    const email = await getEmail(folderPath(), id)
+    clearMainContent()
+
+    const bodyScroll = new ScrollBoxRenderable(renderer, {
+      id: "email-body-scroll",
+      width: "100%",
+      flexGrow: 1,
+      scrollY: true,
+      scrollX: true,
+      viewportCulling: true,
+    })
+    bodyScroll.add(
+      Text({
+        content: email.body,
+        fg: "#CCCCCC",
+        selectable: true,
+      }),
+    )
+
+    mainContent.add(
+      Box(
+        {
+          flexDirection: "column",
+          padding: 1,
+          gap: 0,
+          width: "100%",
+          height: "100%",
+        },
+        Text({ content: email.from, fg: "#e94560", attributes: TextAttributes.BOLD }),
+        Text({ content: email.subject, fg: "#FFFFFF" }),
+        Text({ content: formatDate(email.date), fg: "#555555" }),
+        Text({ content: "" }),
+        bodyScroll,
+      ),
+    )
+  } catch {
+    clearMainContent()
+    showSplash("error loading email")
+  }
 }
 
-showSplash()
+async function switchFolder(name: string) {
+  currentFolder = name
+  selectedEmailId = null
+  showSplash("loading...")
+  setStatus(`${cleanFolderName(name)} — loading...`)
+  await loadEmails()
+  const f = envelopes.length
+  setStatus(`${cleanFolderName(name)} — ${f} email${f === 1 ? "" : "s"}`)
+  emailSelect.focus()
+}
+
+async function loadFoldersIntoTabs() {
+  const folders = await listFolders(config.maildir)
+  const currentValid = folders.find(f => f.name === currentFolder)
+  if (!currentValid) currentFolder = "INBOX"
+
+  folderTabs.setOptions(
+    folders.map((f, i) => ({
+      name: f.unread > 0 ? `${cleanFolderName(f.name)} · ${f.unread}` : cleanFolderName(f.name),
+      description: f.name,
+      value: f.name,
+    }))
+  )
+
+  const idx = folders.findIndex(f => f.name === currentFolder)
+  if (idx >= 0) folderTabs.setSelectedIndex(idx)
+}
+
+async function triggerSync() {
+  if (syncInProgress) return
+  syncInProgress = true
+  setStatus("syncing...")
+  showSplash("syncing...")
+
+  const result = await syncNow()
+  syncInProgress = false
+
+  if (result.success) {
+    setStatus("sync complete")
+    await loadFoldersIntoTabs()
+    await loadEmails()
+  } else {
+    setStatus("sync failed — check mbsync config")
+    showSplash("sync failed")
+  }
+}
 
 const emailSelect = new SelectRenderable(renderer, {
   id: "email-select",
   width: "100%",
-  height: "100%",
-  options: emails.map(e => ({
-    name: e.from,
-    description: e.subject,
-    value: e.id,
-  })),
+  flexGrow: 1,
+  options: [],
   selectedBackgroundColor: "#e94560",
   selectedTextColor: "#FFFFFF",
   textColor: "#CCCCCC",
@@ -144,8 +193,7 @@ const emailSelect = new SelectRenderable(renderer, {
 
 emailSelect.focus()
 emailSelect.on(SelectRenderableEvents.ITEM_SELECTED, (_index, option) => {
-  const email = emails.find(e => e.id === option.value)
-  if (email) showEmail(email)
+  if (option.value && typeof option.value === "string") openEmail(option.value)
 })
 
 const sidebarBox = new BoxRenderable(renderer, {
@@ -159,10 +207,50 @@ const sidebarBox = new BoxRenderable(renderer, {
 })
 sidebarBox.add(emailSelect)
 
+const folderTabs = new TabSelectRenderable(renderer, {
+  id: "folder-tabs",
+  width: "100%",
+  options: [{ name: "loading...", description: "", value: "" }],
+  backgroundColor: "#0f3460",
+  textColor: "#888888",
+  selectedBackgroundColor: "#e94560",
+  selectedTextColor: "#FFFFFF",
+  showUnderline: true,
+  showDescription: false,
+  tabWidth: 18,
+})
+
+folderTabs.on(TabSelectRenderableEvents.ITEM_SELECTED, (_index, option) => {
+  if (option.value && typeof option.value === "string" && option.value !== currentFolder) {
+    switchFolder(option.value)
+  }
+})
+folderTabs.on(TabSelectRenderableEvents.SELECTION_CHANGED, (_index, option) => {
+  if (option.value && typeof option.value === "string" && option.value !== currentFolder) {
+    switchFolder(option.value)
+  }
+})
+
+const statusBar = new BoxRenderable(renderer, {
+  id: "status-bar",
+  height: 1,
+  backgroundColor: "#0f3460",
+  flexDirection: "row",
+  paddingLeft: 1,
+})
+
+showSplash("loading...")
+setStatus("loading...")
+
 renderer.addInputHandler((sequence) => {
   if (sequence === "\x1b") {
+    selectedEmailId = null
     showSplash()
     emailSelect.focus()
+    return true
+  }
+  if (sequence === "r") {
+    triggerSync()
     return true
   }
   return false
@@ -171,11 +259,56 @@ renderer.addInputHandler((sequence) => {
 renderer.root.add(
   Box(
     {
-      flexDirection: "row",
+      flexDirection: "column",
       width: "100%",
       height: "100%",
     },
-    sidebarBox,
-    mainContent,
+    Box(
+      {
+        flexDirection: "row",
+        width: "100%",
+        backgroundColor: "#0f3460",
+        paddingLeft: 0,
+        paddingRight: 0,
+      },
+      folderTabs,
+    ),
+    Box(
+      {
+        flexDirection: "row",
+        width: "100%",
+        flexGrow: 1,
+      },
+      sidebarBox,
+      mainContent,
+    ),
+    Box(
+      {
+        flexDirection: "row",
+        height: 1,
+        backgroundColor: "#0f3460",
+        paddingLeft: 1,
+      },
+      Text({ content: " [r] sync  [esc] back", fg: "#555555" }),
+      statusBar,
+    ),
   ),
 )
+
+loadFoldersIntoTabs().then(async () => {
+  await loadEmails()
+  const f = envelopes.length
+  setStatus(`Inbox — ${f} email${f === 1 ? "" : "s"}`)
+})
+
+try {
+  watch(config.maildir, { recursive: true }, () => {
+    if (reloadTimer) clearTimeout(reloadTimer)
+    reloadTimer = setTimeout(() => {
+      loadFoldersIntoTabs()
+      loadEmails()
+    }, 500)
+  })
+} catch {
+  // file watching unavailable
+}
