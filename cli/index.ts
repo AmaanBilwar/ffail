@@ -4,16 +4,16 @@ import {
   TabSelectRenderable, TabSelectRenderableEvents,
   ScrollBoxRenderable, TextAttributes,
 } from "@opentui/core"
-
-import { loadConfig } from "./config"
-import { listEnvelopes, getEmail, formatDate, listFolders, cleanFolderName } from "./maildir"
-import { syncNow } from "./mbsync"
+import { Effect } from "effect"
+import { loadConfigEffect } from "./config"
+import { listEnvelopesEffect, getEmailEffect, formatDate, listFoldersEffect, cleanFolderName } from "./maildir"
+import { syncNowEffect } from "./mbsync"
 import type { EmailEnvelope } from "./types"
 import { watch } from "node:fs"
 import { join } from "node:path"
 
 const renderer = await createCliRenderer({ exitOnCtrlC: true })
-const config = await loadConfig()
+const config = await Effect.runPromise(loadConfigEffect())
 
 let envelopes: EmailEnvelope[] = []
 let syncInProgress = false
@@ -30,6 +30,12 @@ const mainContent = new BoxRenderable(renderer, {
   flexDirection: "column",
   padding: 0,
 })
+
+function runUi<A>(effect: Effect.Effect<A, unknown, never>) {
+  void Effect.runPromise(effect).catch(() => {
+    setStatus("unexpected error")
+  })
+}
 
 function clearMainContent() {
   for (const child of [...mainContent.getChildren()]) child.destroy()
@@ -57,32 +63,28 @@ function setStatus(msg: string) {
   statusBar.add(Text({ content: ` ${msg}`, fg: "#888888" }))
 }
 
-async function loadEmails() {
-  try {
-    envelopes = await listEnvelopes(join(config.maildir, currentFolder), 50)
-    emailSelect.options = envelopes.length === 0
-      ? [{ name: "(empty)", description: "no emails in this folder", value: "" }]
-      : envelopes.map(e => ({
-          name: e.isRead ? e.from : `● ${e.from}`,
-          description: e.subject,
-          value: e.id,
-        }))
+const loadEmailsEffect = Effect.gen(function* () {
+  const nextEnvelopes = yield* listEnvelopesEffect(join(config.maildir, currentFolder), 50)
+  envelopes = nextEnvelopes
+  emailSelect.options = envelopes.length === 0
+    ? [{ name: "(empty)", description: "no emails in this folder", value: "" }]
+    : envelopes.map(e => ({
+        name: e.isRead ? e.from : `● ${e.from}`,
+        description: e.subject,
+        value: e.id,
+      }))
 
     if (selectedEmailId) {
       const stillExists = envelopes.some(e => e.id === selectedEmailId)
       if (!stillExists) selectedEmailId = null
     }
-    if (!selectedEmailId) showSplash()
-  } catch {
-    setStatus("error loading folder")
-  }
-}
+  if (!selectedEmailId) showSplash()
+}).pipe(Effect.catchAll(() => Effect.sync(() => setStatus("error loading folder"))))
 
-async function openEmail(id: string) {
+const openEmailEffect = (id: string) => Effect.gen(function* () {
   selectedEmailId = id
 
-  try {
-    const email = await getEmail(join(config.maildir, currentFolder), id)
+    const email = yield* getEmailEffect(join(config.maildir, currentFolder), id)
     clearMainContent()
 
     const bodyScroll = new ScrollBoxRenderable(renderer, {
@@ -116,25 +118,26 @@ async function openEmail(id: string) {
         bodyScroll,
       ),
     )
-  } catch {
-    clearMainContent()
+}).pipe(
+  Effect.catchAll(() => Effect.sync(() => {
     showSplash("error loading email")
-  }
-}
+  }))
+)
 
-async function switchFolder(name: string) {
+
+const switchFolderEffect = (name: string) => Effect.gen(function* () {
   currentFolder = name
   selectedEmailId = null
   showSplash("loading...")
   setStatus(`${cleanFolderName(name)} — loading...`)
-  await loadEmails()
+  yield* loadEmailsEffect
   const f = envelopes.length
   setStatus(`${cleanFolderName(name)} — ${f} email${f === 1 ? "" : "s"}`)
   emailSelect.focus()
-}
+})
 
-async function loadFoldersIntoTabs() {
-  const folders = await listFolders(config.maildir)
+const loadFoldersIntoTabsEffect = Effect.gen(function* () {
+  const folders = yield* listFoldersEffect(config.maildir)
   const currentValid = folders.find(f => f.name === currentFolder)
   if (!currentValid) currentFolder = "INBOX"
 
@@ -145,29 +148,40 @@ async function loadFoldersIntoTabs() {
       value: f.name,
     }))
   )
-
   const idx = folders.findIndex(f => f.name === currentFolder)
   if (idx >= 0) folderTabs.setSelectedIndex(idx)
-}
+}).pipe(
+  Effect.catchAll(() => Effect.sync(() => {
+    setStatus("error loading folders")
+  }))
+)
 
-async function triggerSync() {
+const triggerSyncEffect = Effect.gen(function* () {
   if (syncInProgress) return
+
   syncInProgress = true
   setStatus("syncing...")
   showSplash("syncing...")
 
-  const result = await syncNow()
-  syncInProgress = false
+  const result = yield* syncNowEffect.pipe(
+    Effect.catchAll(() => Effect.succeed({ success: false, output: "" })),
+  )
 
   if (result.success) {
     setStatus("sync complete")
-    await loadFoldersIntoTabs()
-    await loadEmails()
+    yield* loadFoldersIntoTabsEffect
+    yield* loadEmailsEffect
   } else {
     setStatus("sync failed — check mbsync config")
     showSplash("sync failed")
   }
-}
+}).pipe(
+  Effect.ensuring(
+    Effect.sync(() => {
+      syncInProgress = false
+    })
+  )
+)
 
 const emailSelect = new SelectRenderable(renderer, {
   id: "email-select",
@@ -182,7 +196,8 @@ const emailSelect = new SelectRenderable(renderer, {
 
 emailSelect.focus()
 emailSelect.on(SelectRenderableEvents.ITEM_SELECTED, (_index, option) => {
-  if (option.value && typeof option.value === "string") openEmail(option.value)
+  if (option.value && typeof option.value === "string")
+    runUi(openEmailEffect(option.value))
 })
 
 const sidebarBox = new BoxRenderable(renderer, {
@@ -212,7 +227,7 @@ const folderTabs = new TabSelectRenderable(renderer, {
 
 function switchToFolderOption(option: { value?: unknown }) {
   if (option.value && typeof option.value === "string" && option.value !== currentFolder) {
-    switchFolder(option.value)
+    runUi(switchFolderEffect(option.value))
   }
 }
 
@@ -251,7 +266,7 @@ renderer.addInputHandler((sequence) => {
     return true
   }
   if (sequence === "r") {
-    triggerSync()
+    runUi(triggerSyncEffect)
     return true
   }
   return false
@@ -296,18 +311,25 @@ renderer.root.add(
   ),
 )
 
-loadFoldersIntoTabs().then(async () => {
-  await loadEmails()
-  const f = envelopes.length
-  setStatus(`Inbox — ${f} email${f === 1 ? "" : "s"}`)
-})
+runUi(
+  Effect.gen(function* () {
+    yield* loadFoldersIntoTabsEffect
+    yield* loadEmailsEffect
+    const f = envelopes.length
+    setStatus(`Inbox — ${f} email${f === 1 ? "" : "s"}`)
+  })
+)
 
 try {
   watch(config.maildir, { recursive: true }, () => {
     if (reloadTimer) clearTimeout(reloadTimer)
     reloadTimer = setTimeout(() => {
-      loadFoldersIntoTabs()
-      loadEmails()
+      runUi(
+        Effect.gen(function* () {
+          yield* loadFoldersIntoTabsEffect
+          yield* loadEmailsEffect
+        })
+      )
     }, 500)
   })
 } catch {
