@@ -74,50 +74,52 @@ const loadEmailsEffect = Effect.gen(function* () {
         value: e.id,
       }))
 
-    if (selectedEmailId) {
-      const stillExists = envelopes.some(e => e.id === selectedEmailId)
-      if (!stillExists) selectedEmailId = null
-    }
+  if (selectedEmailId) {
+    const stillExists = envelopes.some(e => e.id === selectedEmailId)
+    if (!stillExists) selectedEmailId = null
+  }
   if (!selectedEmailId) showSplash()
 }).pipe(Effect.catchAll(() => Effect.sync(() => setStatus("error loading folder"))))
 
 const openEmailEffect = (id: string) => Effect.gen(function* () {
   selectedEmailId = id
+  clearMainContent()
+  mainContent.add(Text({ content: "Loading...", fg: "#555555" }))
 
-    const email = yield* getEmailEffect(join(config.maildir, currentFolder), id)
-    clearMainContent()
+  const email = yield* getEmailEffect(join(config.maildir, currentFolder), id)
+  clearMainContent()
 
-    const bodyScroll = new ScrollBoxRenderable(renderer, {
-      id: "email-body-scroll",
-      width: "100%",
-      flexGrow: 1,
-      scrollY: true,
-      scrollX: true,
-      viewportCulling: true,
-    })
-    bodyScroll.add(
-      Text({
-        content: email.body,
-        fg: "#CCCCCC",
-        selectable: true,
-      }),
-    )
+  const bodyScroll = new ScrollBoxRenderable(renderer, {
+    id: "email-body-scroll",
+    width: "100%",
+    flexGrow: 1,
+    scrollY: true,
+    scrollX: true,
+    viewportCulling: true,
+  })
+  bodyScroll.add(
+    Text({
+      content: email.body,
+      fg: "#CCCCCC",
+      selectable: true,
+    }),
+  )
 
-    mainContent.add(
-      Box(
-        {
-          flexDirection: "column",
-          padding: 1,
-          gap: 0,
-          flexGrow: 1,
-        },
-        Text({ content: email.from, fg: "#e94560", attributes: TextAttributes.BOLD }),
-        Text({ content: email.subject, fg: "#FFFFFF" }),
-        Text({ content: formatDate(email.date), fg: "#555555" }),
-        Text({ content: "" }),
-        bodyScroll,
-      ),
-    )
+  mainContent.add(
+    Box(
+      {
+        flexDirection: "column",
+        padding: 1,
+        gap: 0,
+        flexGrow: 1,
+      },
+      Text({ content: email.from, fg: "#e94560", attributes: TextAttributes.BOLD }),
+      Text({ content: email.subject, fg: "#FFFFFF" }),
+      Text({ content: formatDate(email.date), fg: "#555555" }),
+      Text({ content: "" }),
+      bodyScroll,
+    ),
+  )
 }).pipe(
   Effect.catchAll(() => Effect.sync(() => {
     showSplash("error loading email")
@@ -160,28 +162,28 @@ const triggerSyncEffect = Effect.gen(function* () {
   if (syncInProgress) return
 
   syncInProgress = true
-  setStatus("syncing...")
-  showSplash("syncing...")
+  yield* Effect.gen(function* () {
+    setStatus("syncing...")
+    showSplash("syncing...")
 
-  const result = yield* syncNowEffect.pipe(
-    Effect.catchAll(() => Effect.succeed({ success: false, output: "" })),
-  )
+    const result = yield* syncNowEffect.pipe(
+      Effect.catchAll(() => Effect.succeed({ success: false, output: "" })),
+    )
 
-  if (result.success) {
-    setStatus("sync complete")
-    yield* loadFoldersIntoTabsEffect
-    yield* loadEmailsEffect
-  } else {
-    setStatus("sync failed — check mbsync config")
-    showSplash("sync failed")
-  }
-}).pipe(
-  Effect.ensuring(
+    if (result.success) {
+      setStatus("sync complete")
+      yield* loadFoldersIntoTabsEffect
+      yield* loadEmailsEffect
+    } else {
+      setStatus("sync failed — check mbsync config")
+      showSplash("sync failed")
+    }
+  }).pipe(Effect.ensuring(
     Effect.sync(() => {
       syncInProgress = false
     })
-  )
-)
+  ))
+})
 
 const emailSelect = new SelectRenderable(renderer, {
   id: "email-select",
