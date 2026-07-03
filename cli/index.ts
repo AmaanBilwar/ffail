@@ -52,7 +52,7 @@ function showSplash(msg?: string) {
         width: "100%",
         height: "100%",
       },
-      ASCIIFont({ text: "fffail", font: "huge", color: "#e94560" }),
+      ASCIIFont({ text: "ffail", font: "huge", color: "#e94560" }),
       Text({ content: msg ?? "select an email", fg: "#555555" }),
     ),
   )
