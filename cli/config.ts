@@ -1,5 +1,6 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises"
 import { existsSync } from "node:fs"
+import { Effect } from "effect"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import type { FfailConfig } from "./types"
@@ -12,13 +13,39 @@ const DEFAULT_CONFIG: FfailConfig = {
   defaultAccount: "INBOX",
 }
 
-export async function loadConfig(): Promise<FfailConfig> {
+
+class ConfigError {
+
+  readonly _tag = "ConfigError"
+
+  constructor(
+    readonly message: string,
+    readonly cause: unknown,
+  ) {}
+}
+
+export const loadConfigEffect = () => Effect.gen(function* () {
   if (!existsSync(CONFIG_PATH)) {
-    await mkdir(CONFIG_DIR, { recursive: true })
-    await writeFile(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2))
+    yield* Effect.tryPromise({
+      try: () => mkdir(CONFIG_DIR, {
+        recursive: true
+      }), catch: (cause) => new ConfigError("Failed to create config directory", cause),
+    })
+    yield* Effect.tryPromise({
+      try: () => writeFile(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2)), catch: (cause) => new ConfigError("Failed to write default config", cause),
+    })
     return { ...DEFAULT_CONFIG }
   }
 
-  const data = await readFile(CONFIG_PATH, "utf-8")
-  return { ...DEFAULT_CONFIG, ...JSON.parse(data) }
-}
+  const data = yield* Effect.tryPromise({
+    try: () => readFile(CONFIG_PATH, "utf-8"),
+    catch: (cause) => new ConfigError("Failed to read config", cause),
+  })
+
+  const parsed = yield* Effect.try({
+    try: () => JSON.parse(data) as Partial<FfailConfig>,
+    catch: (cause) => new ConfigError("Failed to parse config file", cause)
+  })
+
+  return { ...DEFAULT_CONFIG, ...parsed }
+})
