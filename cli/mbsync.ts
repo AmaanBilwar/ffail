@@ -1,12 +1,20 @@
-import { Effect } from "effect"
+import { Data, Effect } from "effect"
 
 
-class SyncError {
-  readonly _tag = "SyncError"
-  constructor(
-    readonly message:string, readonly cause: unknown,
-  ) {}
-}
+class SyncSpawnError extends Data.TaggedError("SyncSpawnError")<{
+  readonly message: string
+  readonly cause: unknown
+}> {}
+
+class SyncOutputError extends Data.TaggedError("SyncOutputError")<{
+  readonly message: string
+  readonly cause: unknown
+}> {}
+
+class SyncWaitError extends Data.TaggedError("SyncWaitError")<{
+  readonly message: string
+  readonly cause: unknown
+}> {}
 
 export interface SyncResult {
   success: boolean
@@ -14,47 +22,40 @@ export interface SyncResult {
 }
 
 export async function syncNow(): Promise<SyncResult> {
-  const proc = Bun.spawn(["mbsync", "-a"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ])
-
-  const exitCode = await proc.exited
-
-  return {
-    success: exitCode <= 1,
-    output: stdout + stderr,
-  }
+  return Effect.runPromise(syncNowEffect)
 }
 
-export const syncNowEffect = Effect.gen(function*() {
-  const proc = Bun.spawn(["mbsync", "-a"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  })
+export const syncNowEffect = Effect.acquireUseRelease(
+  Effect.try({
+    try: () => Bun.spawn(["mbsync", "-a"], { stdout: "pipe", stderr: "pipe" }),
+    catch: (cause) => new SyncSpawnError({ message: "Failed to spawn mbsync", cause }),
+  }),
+  (proc) =>
+    Effect.gen(function* () {
+      const [stdout, stderr] = yield* Effect.tryPromise({
+        try: () => Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+        ]),
+        catch: (cause) => new SyncOutputError({ message: "Failed to read mbsync output", cause }),
+      })
 
-  const [stdout, stderr] = yield* Effect.tryPromise({
-    try: () => Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]),
-    catch: (cause) => new SyncError("Failed to read mbsync output" , cause),
-  })
+      const exitCode = yield* Effect.tryPromise({
+        try: () => proc.exited,
+        catch: (cause) => new SyncWaitError({ message: "Failed to wait for mbsync", cause }),
+      })
 
-  const exitCode = yield* Effect.tryPromise(
-    {
-      try: () => proc.exited,
-      catch: (cause) => new SyncError("Failed to wait for mbsync" , cause),
-    }
-  )
-
-  return {
-    success: exitCode <= 1,
-    output: stdout + stderr,
-  }
-})
+      return {
+        success: exitCode <= 1,
+        output: stdout + stderr,
+      }
+    }),
+  (proc) =>
+    Effect.sync(() => {
+      try {
+        if (proc.exitCode === null) proc.kill()
+      } catch {
+        // ignore cleanup errors
+      }
+    }),
+)
