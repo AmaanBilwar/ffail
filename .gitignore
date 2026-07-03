@@ -1,2 +1,3 @@
 /target
-repos/effect
+config.bat
+node_modules

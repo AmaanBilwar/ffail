@@ -10,6 +10,7 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@ff-labs/fff-node": "^0.9.6",
     "@opentui/core": "^0.4.2",
     "effect": "^3.21.4",
     "mailparser": "^3.9.12"
