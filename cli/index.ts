@@ -1,3 +1,4 @@
+import { FileFinder } from "@ff-labs/fff-node"
 import {
   createCliRenderer, Box, ASCIIFont, Text,
   SelectRenderable, SelectRenderableEvents, BoxRenderable,
@@ -8,18 +9,35 @@ import { Effect } from "effect"
 import { loadConfigEffect } from "./config"
 import { listEnvelopesEffect, getEmailEffect, formatDate, listFoldersEffect, cleanFolderName } from "./maildir"
 import { syncNowEffect } from "./mbsync"
+import { searchEmailsEffect, encodeSearchValue, decodeSearchValue } from "./search"
+import type { FoundEmail } from "./search"
 import type { EmailEnvelope } from "./types"
+import { readFile } from "node:fs/promises"
+import { simpleParser } from "mailparser"
 import { watch } from "node:fs"
 import { join } from "node:path"
 
 const renderer = await createCliRenderer({ exitOnCtrlC: true })
 const config = await Effect.runPromise(loadConfigEffect())
 
+let finder: FileFinder
+const finderResult = FileFinder.create({ basePath: config.maildir, aiMode: true })
+if (finderResult.ok) {
+  finder = finderResult.value
+} else {
+  console.error("fff init:", finderResult.error)
+  process.exit(1)
+}
+
 let envelopes: EmailEnvelope[] = []
 let syncInProgress = false
 let selectedEmailId: string | null = null
 let reloadTimer: ReturnType<typeof setTimeout> | null = null
 let currentFolder = "INBOX"
+let searchMode = false
+let searchQuery = ""
+let searchResults: FoundEmail[] | null = null
+let indexReady = false
 
 const mainContent = new BoxRenderable(renderer, {
   id: "main-content",
@@ -128,6 +146,7 @@ const openEmailEffect = (id: string) => Effect.gen(function* () {
 
 
 const switchFolderEffect = (name: string) => Effect.gen(function* () {
+  exitSearchMode()
   currentFolder = name
   selectedEmailId = null
   showSplash("loading...")
@@ -157,6 +176,93 @@ const loadFoldersIntoTabsEffect = Effect.gen(function* () {
     setStatus("error loading folders")
   }))
 )
+
+function exitSearchMode() {
+  searchMode = false
+  searchQuery = ""
+  searchResults = null
+}
+
+const openEmailFromSearchEffect = (folder: string, filename: string, subdir: "cur" | "new") =>
+  Effect.gen(function* () {
+    selectedEmailId = filename
+    clearMainContent()
+    mainContent.add(Text({ content: "Loading...", fg: "#555555" }))
+
+    const filePath = join(config.maildir, folder, subdir, filename)
+    const buf = yield* Effect.tryPromise({
+      try: () => readFile(filePath),
+      catch: (cause) => new Error(`read failed: ${cause}`),
+    })
+    const parsed = yield* Effect.tryPromise({
+      try: () => simpleParser(buf),
+      catch: (cause) => new Error(`parse failed: ${cause}`),
+    })
+    const email = {
+      id: filename,
+      from: parsed.from?.text || "Unknown",
+      subject: parsed.subject || "(no subject)",
+      date: parsed.date || new Date(0),
+      isRead: subdir === "cur",
+      body: parsed.text || (parsed.html ? parsed.html.replace(/<[^>]*>/g, "").trim() : "") || "(no content)",
+    }
+    clearMainContent()
+
+    const bodyScroll = new ScrollBoxRenderable(renderer, {
+      id: "email-body-scroll",
+      width: "100%",
+      flexGrow: 1,
+      scrollY: true,
+      scrollX: true,
+      viewportCulling: true,
+    })
+    bodyScroll.add(
+      Text({
+        content: email.body,
+        fg: "#CCCCCC",
+        selectable: true,
+      }),
+    )
+
+    mainContent.add(
+      Box(
+        {
+          flexDirection: "column",
+          padding: 1,
+          gap: 0,
+          flexGrow: 1,
+        },
+        Text({ content: `${cleanFolderName(folder)} — ${email.from}`, fg: "#e94560", attributes: TextAttributes.BOLD }),
+        Text({ content: email.subject, fg: "#FFFFFF" }),
+        Text({ content: formatDate(email.date), fg: "#555555" }),
+        Text({ content: "" }),
+        bodyScroll,
+      ),
+    )
+    setStatus(`search result — ${cleanFolderName(folder)}`)
+  }).pipe(
+    Effect.catchAll(() => Effect.sync(() => showSplash("error loading email"))),
+  )
+
+const runSearchEffect = (query: string) =>
+  Effect.gen(function* () {
+    setStatus(`searching: ${query}...`)
+    const { items } = yield* searchEmailsEffect(finder, query)
+    searchResults = items
+
+    if (items.length === 0) {
+      setStatus(`search "${query}" — no results`)
+      return
+    }
+
+    emailSelect.options = items.map((e) => ({
+      name: `${e.matchType === "header" ? "H" : "B"} ${cleanFolderName(e.folder)} ${e.lineContent.slice(0, 58)}`,
+      description: e.lineContent,
+      value: encodeSearchValue(e),
+    }))
+    emailSelect.focus()
+    setStatus(`search "${query}" — ${items.length} result${items.length === 1 ? "" : "s"}`)
+  })
 
 const triggerSyncEffect = Effect.gen(function* () {
   if (syncInProgress) return
@@ -198,8 +304,18 @@ const emailSelect = new SelectRenderable(renderer, {
 
 emailSelect.focus()
 emailSelect.on(SelectRenderableEvents.ITEM_SELECTED, (_index, option) => {
-  if (option.value && typeof option.value === "string")
+  if (!option.value || typeof option.value !== "string") return
+
+  if (searchResults !== null) {
+    const found = decodeSearchValue(option.value)
+    if (found) {
+      const f = found
+      exitSearchMode()
+      runUi(openEmailFromSearchEffect(f.folder, f.filename, f.subdir))
+    }
+  } else {
     runUi(openEmailEffect(option.value))
+  }
 })
 
 const sidebarBox = new BoxRenderable(renderer, {
@@ -249,6 +365,43 @@ showSplash("loading...")
 setStatus("loading...")
 
 renderer.addInputHandler((sequence) => {
+  if (searchMode) {
+    // viewing search results — let nav/Enter through to SelectRenderable
+    if (searchResults !== null) {
+      if (sequence === "\x1b") {
+        exitSearchMode()
+        runUi(loadEmailsEffect)
+        showSplash()
+        emailSelect.focus()
+        return true
+      }
+      return false
+    }
+
+    // typing query
+    if (sequence === "\r") {
+      runUi(runSearchEffect(searchQuery))
+      return true
+    }
+    if (sequence === "\x1b") {
+      exitSearchMode()
+      showSplash()
+      emailSelect.focus()
+      return true
+    }
+    if (sequence === "\x7f" || sequence === "\b") {
+      searchQuery = searchQuery.slice(0, -1)
+      setStatus(`/${searchQuery}`)
+      return true
+    }
+    if (sequence.length === 1 && sequence >= " ") {
+      searchQuery += sequence
+      setStatus(`/${searchQuery}`)
+      return true
+    }
+    return true
+  }
+
   if (sequence === "\x1b[D") {
     folderTabs.moveLeft()
     const option = folderTabs.getSelectedOption()
@@ -265,6 +418,17 @@ renderer.addInputHandler((sequence) => {
     selectedEmailId = null
     showSplash()
     emailSelect.focus()
+    return true
+  }
+  if (sequence === "/") {
+    if (!indexReady) {
+      setStatus("indexing emails...")
+      return true
+    }
+    searchMode = true
+    searchQuery = ""
+    searchResults = null
+    setStatus("/")
     return true
   }
   if (sequence === "r") {
@@ -307,7 +471,7 @@ renderer.root.add(
         backgroundColor: "#0f3460",
         paddingLeft: 1,
       },
-      Text({ content: " [r] sync  [esc] back", fg: "#555555" }),
+      Text({ content: " [/] search  [r] sync  [esc] back", fg: "#555555" }),
       statusBar,
     ),
   ),
@@ -315,6 +479,9 @@ renderer.root.add(
 
 runUi(
   Effect.gen(function* () {
+    setStatus("indexing...")
+    yield* Effect.promise(() => finder.waitForIndexReady(20000))
+    indexReady = true
     yield* loadFoldersIntoTabsEffect
     yield* loadEmailsEffect
     const f = envelopes.length
