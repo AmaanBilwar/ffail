@@ -57,30 +57,22 @@ function setStatus(msg: string) {
   statusBar.add(Text({ content: ` ${msg}`, fg: "#888888" }))
 }
 
-function updateEmailList() {
-  emailSelect.options = envelopes.length === 0
-    ? [{ name: "(empty)", description: "no emails in this folder", value: "" }]
-    : envelopes.map(e => ({
-        name: e.isRead ? e.from : `● ${e.from}`,
-        description: e.subject,
-        value: e.id,
-      }))
-
-  if (selectedEmailId) {
-    const stillExists = envelopes.some(e => e.id === selectedEmailId)
-    if (!stillExists) selectedEmailId = null
-  }
-  if (!selectedEmailId) showSplash()
-}
-
-function folderPath(): string {
-  return join(config.maildir, currentFolder)
-}
-
 async function loadEmails() {
   try {
-    envelopes = await listEnvelopes(folderPath(), 50)
-    updateEmailList()
+    envelopes = await listEnvelopes(join(config.maildir, currentFolder), 50)
+    emailSelect.options = envelopes.length === 0
+      ? [{ name: "(empty)", description: "no emails in this folder", value: "" }]
+      : envelopes.map(e => ({
+          name: e.isRead ? e.from : `● ${e.from}`,
+          description: e.subject,
+          value: e.id,
+        }))
+
+    if (selectedEmailId) {
+      const stillExists = envelopes.some(e => e.id === selectedEmailId)
+      if (!stillExists) selectedEmailId = null
+    }
+    if (!selectedEmailId) showSplash()
   } catch {
     setStatus("error loading folder")
   }
@@ -90,7 +82,7 @@ async function openEmail(id: string) {
   selectedEmailId = id
 
   try {
-    const email = await getEmail(folderPath(), id)
+    const email = await getEmail(join(config.maildir, currentFolder), id)
     clearMainContent()
 
     const bodyScroll = new ScrollBoxRenderable(renderer, {
