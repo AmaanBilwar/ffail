@@ -46,7 +46,7 @@ function showSplash(msg?: string) {
         width: "100%",
         height: "100%",
       },
-      ASCIIFont({ text: "ffail", font: "huge", color: "#e94560" }),
+      ASCIIFont({ text: "fffail", font: "huge", color: "#e94560" }),
       Text({ content: msg ?? "select an email", fg: "#555555" }),
     ),
   )
@@ -88,8 +88,6 @@ async function loadEmails() {
 
 async function openEmail(id: string) {
   selectedEmailId = id
-  clearMainContent()
-  mainContent.add(Text({ content: "Loading...", fg: "#555555" }))
 
   try {
     const email = await getEmail(folderPath(), id)
@@ -117,8 +115,7 @@ async function openEmail(id: string) {
           flexDirection: "column",
           padding: 1,
           gap: 0,
-          width: "100%",
-          height: "100%",
+          flexGrow: 1,
         },
         Text({ content: email.from, fg: "#e94560", attributes: TextAttributes.BOLD }),
         Text({ content: email.subject, fg: "#FFFFFF" }),
@@ -150,7 +147,7 @@ async function loadFoldersIntoTabs() {
   if (!currentValid) currentFolder = "INBOX"
 
   folderTabs.setOptions(
-    folders.map((f, i) => ({
+    folders.map((f) => ({
       name: f.unread > 0 ? `${cleanFolderName(f.name)} · ${f.unread}` : cleanFolderName(f.name),
       description: f.name,
       value: f.name,
@@ -199,6 +196,7 @@ emailSelect.on(SelectRenderableEvents.ITEM_SELECTED, (_index, option) => {
 const sidebarBox = new BoxRenderable(renderer, {
   id: "sidebar",
   flexGrow: 1,
+  minWidth: 30,
   backgroundColor: "#1a1a2e",
   borderStyle: "rounded",
   borderColor: "#0f3460",
@@ -220,15 +218,14 @@ const folderTabs = new TabSelectRenderable(renderer, {
   tabWidth: 18,
 })
 
+function switchToFolderOption(option: { value?: unknown }) {
+  if (option.value && typeof option.value === "string" && option.value !== currentFolder) {
+    switchFolder(option.value)
+  }
+}
+
 folderTabs.on(TabSelectRenderableEvents.ITEM_SELECTED, (_index, option) => {
-  if (option.value && typeof option.value === "string" && option.value !== currentFolder) {
-    switchFolder(option.value)
-  }
-})
-folderTabs.on(TabSelectRenderableEvents.SELECTION_CHANGED, (_index, option) => {
-  if (option.value && typeof option.value === "string" && option.value !== currentFolder) {
-    switchFolder(option.value)
-  }
+  switchToFolderOption(option)
 })
 
 const statusBar = new BoxRenderable(renderer, {
@@ -243,6 +240,18 @@ showSplash("loading...")
 setStatus("loading...")
 
 renderer.addInputHandler((sequence) => {
+  if (sequence === "\x1b[D") {
+    folderTabs.moveLeft()
+    const option = folderTabs.getSelectedOption()
+    if (option) switchToFolderOption(option)
+    return true
+  }
+  if (sequence === "\x1b[C") {
+    folderTabs.moveRight()
+    const option = folderTabs.getSelectedOption()
+    if (option) switchToFolderOption(option)
+    return true
+  }
   if (sequence === "\x1b") {
     selectedEmailId = null
     showSplash()
