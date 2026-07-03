@@ -13,6 +13,13 @@
 - `cli/config.ts` — loads ~/.ffail/config.json
 - `cli/types.ts` — EmailEnvelope, SyncResult types
 
+## Vendored repositories
+- External repositories are vendored under `repos/` as read-only reference material.
+- When writing Effect code, inspect `repos/effect/` for idiomatic usage, tests, module structure, and API design.
+- Prefer examples and patterns from vendored source code over generated guesses or web search results.
+- Do not edit files under `repos/` unless explicitly asked.
+- Do not import from `repos/`; application code should continue importing from normal package dependencies.
+
 ## Config
 - `~/.mbsyncrc` — Gmail IMAP + MaildirStore + Channels for all folders
 - `~/.ffail/config.json` — { maildir, defaultAccount }
