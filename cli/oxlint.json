@@ -1,0 +1,9 @@
+{
+  "rules": {
+    "correctness": "all",
+    "suspicious": "all",
+    "style": "all",
+    "perf": "all"
+  },
+  "ignorePatterns": ["node_modules", "dist", "*.js"]
+}

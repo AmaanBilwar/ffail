@@ -5,6 +5,7 @@ write minimal code for maximum output basically meaning follow paretto's princip
 ## Project Architecture
 
 ffail is a TUI email client using:
+
 - **@opentui/core** — terminal UI framework (Rust binary + TS bindings)
 - **mailparser** — RFC 2822/MIME email parsing
 - **mbsync** (external) — IMAP→Maildir sync tool
@@ -13,7 +14,7 @@ ffail is a TUI email client using:
 ### Architecture: mbsync + Maildir
 
 Gmail ──[IMAP]──► mbsync ──[write files]──► ~/.ffail/mail/<account>/INBOX/{new,cur}/
-                                              ffail reads these files directly
+ffail reads these files directly
 
 ffail does NOT speak IMAP. mbsync handles all IMAP work. ffail just reads local Maildir files.
 
@@ -42,16 +43,19 @@ cli/
 `maildir` should point to the mbsync MaildirStore path (contains INBOX/new/, INBOX/cur/).
 
 ### Keybinds
+
 - `j`/`k` or arrows — navigate email list
 - `Enter` — open selected email
 - `r` — trigger mbsync sync
 - `Esc` — back to splash/list
 
 ### Maildir format
+
 Files in `new/` = unread, `cur/` = read.
 Filename: `<timestamp>.<pid>.<host>:2,<flags>` where S=seen,R=replied,F=flagged.
 
 ### Run
+
 ```
 bun run index.ts
 ```
